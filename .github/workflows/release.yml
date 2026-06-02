@@ -36,7 +36,7 @@ jobs:
       - name: Checkout private source
         uses: actions/checkout@v4
         with:
-          repository: tlyboys/snoozeyoulose
+          repository: tlyboys/snoozeyoulose-app
           ref: ${{ github.event.inputs.ref || 'main' }}
           token: ${{ secrets.SOURCE_TOKEN }}
 

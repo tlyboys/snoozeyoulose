@@ -1,0 +1,96 @@
+name: release
+
+# 从私有源码仓 tlyboys/snoozeyoulose 检出、构建、签名并发布到本（公开）仓库的 Releases。
+# 公开仓库可使用组织级 Apple 签名 secrets；electron-updater 也能免 token 从公开 release 拉更新。
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要构建的源码 ref（分支或 tag）'
+        default: main
+  push:
+    branches:
+      - release
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # 本（公开）仓库的 token，用于把 release 发布到本仓库
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # 组织级 Apple 签名 secrets（公开仓库可用）
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: tlyboys/snoozeyoulose
+          ref: ${{ github.event.inputs.ref || 'main' }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Import Apple Developer Certificate
+        if: matrix.os == 'macos-latest'
+        run: |
+          # secret 值在 run 的 shell env 里不会被屏蔽（与 if 表达式不同），可靠判断是否有证书
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning::APPLE_CERTIFICATE 未注入，macOS 将产出未签名构建。"
+            exit 0
+          fi
+          echo "APPLE_CERTIFICATE present (length ${#APPLE_CERTIFICATE})"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import $RUNNER_TEMP/certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          CERT_ID=$(security find-identity -v -p codesigning build.keychain | grep "Developer ID Application" | awk -F'"' '{print $2}')
+          echo "CSC_NAME=$CERT_ID" >> $GITHUB_ENV
+          echo "CSC_LINK=$RUNNER_TEMP/certificate.p12" >> $GITHUB_ENV
+          echo "CSC_KEY_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> $GITHUB_ENV
+
+      - name: Build & publish (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          pnpm exec tsc
+          pnpm exec vite build
+          if [ -n "$APPLE_TEAM_ID" ]; then
+            pnpm exec electron-builder --mac --publish always --config.mac.notarize.teamId=$APPLE_TEAM_ID
+          else
+            pnpm exec electron-builder --mac --publish always
+          fi
+
+      - name: Build & publish (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          pnpm exec tsc
+          pnpm exec vite build
+          pnpm exec electron-builder --win --publish always
+
+      - name: Build & publish (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          pnpm exec tsc
+          pnpm exec vite build
+          pnpm exec electron-builder --linux --publish always
